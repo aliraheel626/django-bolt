@@ -5,6 +5,7 @@ icon: lucide/flask-conical
 # Testing
 
 Django-Bolt provides a `TestClient` for testing your API endpoints without starting a server.
+`httpx` is included in `django-bolt` dependencies because the testing clients are built on top of it.
 
 ## TestClient
 
@@ -248,7 +249,27 @@ with TestClient(api) as client:
 
 ## Testing with pytest
 
-### Basic test file
+### Real project pattern (recommended)
+
+Import the API object from your real app module so tests match production routing:
+
+```python
+# tests/test_api.py
+import pytest
+from django_bolt.testing import TestClient
+from myproject.api import api  # Your actual API module
+
+@pytest.fixture
+def client():
+    with TestClient(api) as client:
+        yield client
+
+def test_hello(client):
+    response = client.get("/hello")
+    assert response.status_code == 200
+```
+
+### Isolated API fixture pattern
 
 ```python
 # tests/test_api.py
