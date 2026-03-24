@@ -1,6 +1,6 @@
 from django_bolt.middleware_response import MiddlewareResponse
 from django_bolt.responses import StreamingResponse
-from django_bolt.serialization import _BODY_BYTES, _BODY_STREAM
+from django_bolt.serialization import _BODY_BYTES, _BODY_FILE, _BODY_STREAM
 
 
 def test_middleware_response_does_not_promote_content_attribute_objects_to_stream():
@@ -32,3 +32,19 @@ def test_middleware_response_marks_streaming_response_body_as_stream():
 
     _status, _meta, body_kind, _payload = response.to_tuple()
     assert body_kind == _BODY_STREAM  # 1
+
+
+def test_middleware_response_extracts_content_type_case_insensitively():
+    response = MiddlewareResponse(
+        status_code=200,
+        headers={"Content-Type": "text/css", "X-Test": "1"},
+        body="/tmp/example.css",
+        response_type="file",
+        body_kind=_BODY_FILE,
+    )
+
+    _status, meta, body_kind, payload = response.to_tuple()
+
+    assert meta == ("file", "text/css", [("X-Test", "1")], None)
+    assert body_kind == _BODY_FILE
+    assert payload == "/tmp/example.css"

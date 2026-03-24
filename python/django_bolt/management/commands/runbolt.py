@@ -50,6 +50,9 @@ DEV_RELOAD_IGNORE_DIRS = (
     "target",
 )
 
+_DEV_BROWSER_HOST = "127.0.0.1"
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0"})
+
 
 def _get_dev_reload_count() -> int:
     try:
@@ -170,6 +173,18 @@ def _collect_dev_watch_paths() -> list[str]:
 
 def _collect_dev_ignore_paths() -> list[str]:
     return [str(path) for path in sorted(_venv_prefix_paths(), key=str)]
+
+
+def _display_host(host: str, *, dev_mode: bool) -> str:
+    """Return the browser-friendly host to show in banner URLs."""
+    if dev_mode and host in _WILDCARD_BIND_HOSTS:
+        return _DEV_BROWSER_HOST
+    return host
+
+
+def _build_display_url(host: str, port: int, *, dev_mode: bool, path: str = "") -> str:
+    """Build a user-facing URL for startup banner output."""
+    return f"http://{_display_host(host, dev_mode=dev_mode)}:{port}{path}"
 
 
 def _is_django_bolt_attribute(node: ast.Attribute) -> bool:
@@ -410,6 +425,7 @@ class Command(BaseCommand):
             setup_django_logging()
         if initialize_file_response_settings is not None:
             initialize_file_response_settings()
+        banner_base_url = _build_display_url(options["host"], options["port"], dev_mode=False)
 
         apis = self.autodiscover_apis()
         if not apis:
@@ -433,7 +449,7 @@ class Command(BaseCommand):
                 if openapi_config.enabled:
                     merged_api._openapi_config = openapi_config
                     merged_api._register_openapi_routes()
-                    features.append(("OpenAPI", f"http://{options['host']}:{options['port']}{openapi_config.path}"))
+                    features.append(("OpenAPI", f"{banner_base_url}{openapi_config.path}"))
                 break
 
         # Check admin
@@ -442,7 +458,7 @@ class Command(BaseCommand):
             merged_api._register_admin_routes(options["host"], options["port"])
             if merged_api._admin_routes_registered:
                 admin_prefix = detect_admin_url_prefix() or "admin"
-                features.append(("Admin", f"http://{options['host']}:{options['port']}/{admin_prefix}/"))
+                features.append(("Admin", f"{banner_base_url}/{admin_prefix}/"))
                 merged_api._register_static_routes()
 
         _total_route_count = len(merged_api._routes)
@@ -517,6 +533,7 @@ class Command(BaseCommand):
 
         # --- Collect startup info for banner ---
         features: list[tuple[str, str]] = []
+        banner_base_url = _build_display_url(options["host"], options["port"], dev_mode=dev_mode)
 
         # Register OpenAPI routes AFTER merging (so schema includes all routes)
         openapi_enabled = False
@@ -535,7 +552,7 @@ class Command(BaseCommand):
             # Transfer OpenAPI config to merged API
             merged_api._openapi_config = openapi_config
             merged_api._register_openapi_routes()
-            features.append(("OpenAPI", f"http://{options['host']}:{options['port']}{openapi_config.path}"))
+            features.append(("OpenAPI", f"{banner_base_url}{openapi_config.path}"))
 
         # Register Django admin routes if not disabled
         # Admin is controlled solely by --no-admin command-line flag
@@ -548,7 +565,7 @@ class Command(BaseCommand):
 
             if merged_api._admin_routes_registered:
                 admin_prefix = detect_admin_url_prefix() or "admin"
-                features.append(("Admin", f"http://{options['host']}:{options['port']}/{admin_prefix}/"))
+                features.append(("Admin", f"{banner_base_url}/{admin_prefix}/"))
 
                 # Also register static file routes for admin
                 merged_api._register_static_routes()
@@ -627,7 +644,7 @@ class Command(BaseCommand):
         # Print structured startup banner (only for main process or single-process mode)
         if process_id is None:
             if is_dev_reload_restart:
-                self.stdout.write(f"  ✨ Reloaded on http://{options['host']}:{options['port']}")
+                self.stdout.write(f"  ✨ Reloaded on {banner_base_url}")
             else:
                 self._print_startup_banner(
                     options=options,
@@ -698,7 +715,7 @@ class Command(BaseCommand):
         port = options["port"]
         processes = options["processes"]
         mode = "development" if dev_mode else "production"
-        url = f"http://{host}:{port}"
+        url = _build_display_url(host, port, dev_mode=dev_mode)
 
         # Determine label width for alignment
         _LABEL_W = 16

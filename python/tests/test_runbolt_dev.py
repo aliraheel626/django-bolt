@@ -40,6 +40,18 @@ def test_build_dev_worker_command_removes_dev_and_forces_single_process():
     ]
 
 
+def test_display_host_uses_loopback_for_dev_wildcard_hosts():
+    assert runbolt_module._display_host("0.0.0.0", dev_mode=True) == "127.0.0.1"
+    assert runbolt_module._display_host("::", dev_mode=True) == "127.0.0.1"
+
+
+def test_build_display_url_preserves_bind_host_outside_dev_mode():
+    assert runbolt_module._build_display_url("0.0.0.0", 8000, dev_mode=False) == "http://0.0.0.0:8000"
+    assert runbolt_module._build_display_url("0.0.0.0", 8000, dev_mode=True, path="/admin/") == (
+        "http://127.0.0.1:8000/admin/"
+    )
+
+
 def test_collapse_watch_paths_deduplicates_nested_directories(tmp_path):
     root = tmp_path / "project"
     nested = root / "app"

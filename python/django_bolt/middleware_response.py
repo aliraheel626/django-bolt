@@ -47,6 +47,31 @@ ResponseBody = bytes | StreamingResponse | str
 Response = tuple[int, ResponseMetaTuple, int, ResponseBody]
 
 
+def _split_content_type_headers(
+    headers: dict[str, str] | None,
+) -> tuple[str | None, list[tuple[str, str]] | None]:
+    """Split a headers dict into content-type and remaining headers.
+
+    Header names are treated case-insensitively, but original key casing is
+    preserved for the remaining header list so Rust remains the single place
+    that normalizes header names.
+    """
+    if not headers:
+        return None, None
+
+    content_type = None
+    remaining_headers: list[tuple[str, str]] = []
+
+    for key, value in headers.items():
+        if key.lower() == "content-type":
+            if content_type is None:
+                content_type = value
+            continue
+        remaining_headers.append((key, value))
+
+    return content_type, remaining_headers or None
+
+
 class MiddlewareResponse:
     """
     Response wrapper for middleware compatibility.
@@ -118,13 +143,7 @@ class MiddlewareResponse:
 
         Returns ResponseMeta format so Rust handles all header/cookie serialization.
         """
-        # Extract content-type if middleware set it
-        custom_ct = self.headers.pop("content-type", None)
-
-        # Build custom headers list (excluding content-type which is handled separately)
-        custom_headers: list[tuple[str, str]] | None = None
-        if self.headers:
-            custom_headers = [(k, v) for k, v in self.headers.items()]
+        custom_ct, custom_headers = _split_content_type_headers(self.headers)
 
         # Return ResponseMeta format - Rust serializes headers and cookies
         meta: ResponseMetaTuple = (

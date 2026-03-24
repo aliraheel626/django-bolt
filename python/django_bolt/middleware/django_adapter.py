@@ -20,18 +20,23 @@ import io
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from asgiref.sync import async_to_sync
-
-from ..middleware_response import MiddlewareResponse
+from ..middleware_response import (
+    _BODY_BYTES,
+    _BODY_FILE,
+    _BODY_STREAM,
+    MiddlewareResponse,
+    _split_content_type_headers,
+)
 
 try:
-    from asgiref.sync import iscoroutinefunction, markcoroutinefunction, sync_to_async
+    from asgiref.sync import async_to_sync, iscoroutinefunction, markcoroutinefunction, sync_to_async
     from django.http import HttpRequest, HttpResponse, QueryDict
     from django.utils.module_loading import import_string
 
     DJANGO_AVAILABLE = True
 except ImportError:
     DJANGO_AVAILABLE = False
+    async_to_sync = None
     HttpRequest = None
     HttpResponse = None
     QueryDict = None
@@ -61,6 +66,12 @@ if TYPE_CHECKING:
 # This allows middleware instances to be created once at startup while
 # still having access to the correct call_next at request time
 _request_context: contextvars.ContextVar[dict] = contextvars.ContextVar("_django_middleware_request_context")
+
+_PRESERVED_BODY_ATTR = "_bolt_preserved_body"
+_PRESERVED_BODY_KIND_ATTR = "_bolt_preserved_body_kind"
+_PRESERVED_BODY_KINDS = frozenset((_BODY_FILE, _BODY_STREAM))
+_REBUILT_BODY_HEADER_NAMES = frozenset(("content-length", "transfer-encoding"))
+_DEFAULT_DJANGO_RESPONSE_CONTENT_TYPE = "application/json"
 
 
 class DjangoMiddleware:
@@ -886,6 +897,37 @@ def _sync_request_attributes(django_request: HttpRequest, bolt_request: Request)
         bolt_request.state["csrf_cookie_needs_reset"] = csrf_cookie_needs_reset
 
 
+def _extract_preserved_body(response: Any) -> tuple[int, Any] | None:
+    """Return special file/stream body payloads that must survive middleware hops."""
+    body_kind = getattr(response, "_body_kind", None)
+    if body_kind not in _PRESERVED_BODY_KINDS or not hasattr(response, "body"):
+        return None
+    return body_kind, response.body
+
+
+def _store_preserved_body(django_response: HttpResponse, preserved_body: tuple[int, Any] | None) -> None:
+    """Attach preserved transport metadata to a Django response when needed."""
+    if preserved_body is None:
+        return
+
+    body_kind, body = preserved_body
+    setattr(django_response, _PRESERVED_BODY_ATTR, body)
+    setattr(django_response, _PRESERVED_BODY_KIND_ATTR, body_kind)
+
+
+def _load_preserved_body(django_response: HttpResponse) -> tuple[int, Any] | None:
+    """Load preserved transport metadata from a Django response if present."""
+    body_kind = getattr(django_response, _PRESERVED_BODY_KIND_ATTR, None)
+    if body_kind not in _PRESERVED_BODY_KINDS:
+        return None
+
+    body = getattr(django_response, _PRESERVED_BODY_ATTR, None)
+    if body is None:
+        return None
+
+    return body_kind, body
+
+
 def _to_django_response(response: Response) -> HttpResponse:
     """Convert Bolt Response/MiddlewareResponse to Django HttpResponse.
 
@@ -896,9 +938,17 @@ def _to_django_response(response: Response) -> HttpResponse:
         return response
 
     # Handle different response types
+    preserved_body = _extract_preserved_body(response)
+
     if hasattr(response, "body"):
         # MiddlewareResponse has .body
-        content = response.body if isinstance(response.body, bytes) else str(response.body).encode()
+        if preserved_body is not None:
+            # Preserve file/stream payloads across Django middleware instead of
+            # coercing them into plain response bytes (which turns file bodies
+            # into raw filesystem paths and drops streaming semantics).
+            content = b""
+        else:
+            content = response.body if isinstance(response.body, bytes) else str(response.body).encode()
     elif hasattr(response, "to_bytes"):
         content = response.to_bytes()
     elif hasattr(response, "content"):
@@ -908,23 +958,26 @@ def _to_django_response(response: Response) -> HttpResponse:
 
     status_code = getattr(response, "status_code", 200)
     headers = getattr(response, "headers", {})
+    content_type, remaining_headers = _split_content_type_headers(headers)
 
     django_response = HttpResponse(
         content=content,
         status=status_code,
-        content_type=headers.get("content-type", headers.get("Content-Type", "application/json")),
+        content_type=content_type or _DEFAULT_DJANGO_RESPONSE_CONTENT_TYPE,
     )
 
-    for key, value in headers.items():
-        if key.lower() != "content-type":
+    if remaining_headers:
+        for key, value in remaining_headers:
             django_response[key] = value
 
+    _store_preserved_body(django_response, preserved_body)
     return django_response
 
 
 def _to_bolt_response(django_response: HttpResponse) -> MiddlewareResponse:
     """Convert Django HttpResponse to MiddlewareResponse for chain compatibility."""
     headers = dict(django_response.items())
+    preserved_body = _load_preserved_body(django_response)
 
     # IMPORTANT: Extract cookies from django_response.cookies as raw tuples
     # Django's set_cookie() stores cookies in response.cookies (SimpleCookie),
@@ -951,11 +1004,23 @@ def _to_bolt_response(django_response: HttpResponse) -> MiddlewareResponse:
                 )
             )
 
+    body = django_response.content
+    response_type = "json"
+    body_kind = _BODY_BYTES
+
+    if preserved_body is not None:
+        body_kind, body = preserved_body
+        response_type = "file" if body_kind == _BODY_FILE else "streaming"
+        # The final Rust file/stream response computes its own transport length.
+        headers = {k: v for k, v in headers.items() if k.lower() not in _REBUILT_BODY_HEADER_NAMES}
+
     return MiddlewareResponse(
         status_code=django_response.status_code,
         headers=headers,
-        body=django_response.content,
+        body=body,
+        response_type=response_type,
         raw_cookies=raw_cookies,
+        body_kind=body_kind,
     )
 
 

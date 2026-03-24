@@ -638,7 +638,15 @@ with TestClient(api) as client:
 
 `TestClient` is lifespan-aware — it enters the lifespan context on `__enter__` and exits on `__exit__`, so lifecycle hooks are exercised automatically.
 
-Only use subprocess-based tests (`subprocess.Popen` + `runbolt`) when testing behavior that `TestClient` cannot exercise (e.g., multi-process, signal handling, actual TCP).
+Only use subprocess-based tests (`subprocess.Popen` + `runbolt`) when testing behavior that `TestClient` cannot exercise (e.g., startup wiring, auto-reload, multi-process, signal handling, actual TCP, streaming, WebSocket handshakes, or packaged artifacts).
+
+Use the layered markers consistently:
+
+- `server_integration`: Real `runbolt` process tests for startup, TCP, reload, streaming, and server-only settings.
+- `platform_smoke`: Small cross-platform smoke coverage for the real server.
+- `artifact_smoke`: Isolated wheel/sdist installation checks that run outside the source tree.
+
+If a change touches startup, reload, multiprocessing, actual TCP, streaming, WebSocket handshake behavior, startup-time settings, or packaged artifacts, add or update a `server_integration` or `artifact_smoke` test.
 
 ### What Makes a Good Test
 

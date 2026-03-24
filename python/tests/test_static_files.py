@@ -15,8 +15,8 @@ import os
 import tempfile
 
 import pytest
-from django.core.exceptions import SuspiciousFileOperation
 from django.contrib.staticfiles.finders import get_finder
+from django.core.exceptions import SuspiciousFileOperation
 
 from django_bolt import BoltAPI
 from django_bolt.admin.static import find_static_file, serve_static_file
@@ -317,6 +317,23 @@ class TestDjangoAdminStaticFiles:
             assert "admin" in result
             assert result.endswith("core.js")
             assert os.path.isfile(result)
+
+
+@pytest.mark.django_db
+def test_admin_static_served_with_django_middleware_enabled():
+    """Admin static files should stay as file responses through Django middleware."""
+    api = BoltAPI(django_middleware=True)
+    api._register_admin_routes("127.0.0.1", 8000)
+    api._register_static_routes()
+
+    with TestClient(api, use_http_layer=True) as client:
+        response = client.get("/static/admin/css/base.css")
+
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("text/css")
+    assert response.content.startswith(b"/*")
+    assert b"DJANGO Admin styles" in response.content
+    assert not response.content.startswith(b"/home/")
 
 
 class TestStaticTemplateTag:
