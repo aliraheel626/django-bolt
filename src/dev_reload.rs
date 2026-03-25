@@ -8,6 +8,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const WORKER_STOP_TIMEOUT_RELOAD: Duration = Duration::from_millis(100);
+const WORKER_STOP_TIMEOUT_SHUTDOWN: Duration = Duration::from_millis(1200);
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 #[derive(Debug, Clone)]
 struct ReloadFilter {
     ignore_dir_names: HashSet<String>,
@@ -26,7 +30,7 @@ impl ReloadFilter {
     }
 
     fn is_relevant(&self, path: &Path) -> bool {
-        !self.is_ignored(path) && !is_temporary_path(path)
+        !self.is_ignored(path) && !is_temporary_path(path) && has_relevant_extension(path)
     }
 
     fn is_ignored(&self, path: &Path) -> bool {
@@ -72,6 +76,13 @@ fn is_temporary_path(path: &Path) -> bool {
         || name == "4913"
         || name.starts_with(".#")
         || (name.starts_with('#') && name.ends_with('#'))
+}
+
+fn has_relevant_extension(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("py" | "html")
+    )
 }
 
 fn first_relevant_path(event: &Event, filter: &ReloadFilter) -> Option<PathBuf> {
@@ -128,11 +139,11 @@ fn wait_for_child_exit(
             return Ok(None);
         }
 
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
     }
 }
 
-fn stop_worker(worker: &mut Option<Child>) -> PyResult<()> {
+fn stop_worker(worker: &mut Option<Child>, timeout: Duration) -> PyResult<()> {
     let Some(child) = worker.as_mut() else {
         return Ok(());
     };
@@ -145,7 +156,7 @@ fn stop_worker(worker: &mut Option<Child>) -> PyResult<()> {
             libc::kill(pid, libc::SIGTERM);
         }
 
-        if wait_for_child_exit(child, Duration::from_millis(1200))
+        if wait_for_child_exit(child, timeout)
             .map_err(|err| py_runtime_error(format!("Failed while stopping dev worker: {}", err)))?
             .is_none()
         {
@@ -176,9 +187,9 @@ fn recv_change(
     rx: &Receiver<notify::Result<Event>>,
     filter: &ReloadFilter,
     debounce: Duration,
-    poll_interval: Duration,
+    recv_timeout: Duration,
 ) -> Result<Option<PathBuf>, String> {
-    match rx.recv_timeout(poll_interval) {
+    match rx.recv_timeout(recv_timeout) {
         Ok(Ok(event)) => {
             let Some(mut changed_path) = first_relevant_path(&event, filter) else {
                 return Ok(None);
@@ -228,7 +239,7 @@ fn run_dev_reloader_inner(
 
     let filter = ReloadFilter::new(ignore_dir_names, ignore_paths);
     let debounce = Duration::from_millis(debounce_ms.max(50));
-    let poll_interval = Duration::from_millis(200);
+    let recv_timeout = Duration::from_millis(200);
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_flag = shutdown.clone();
 
@@ -249,7 +260,7 @@ fn run_dev_reloader_inner(
         },
         Config::default(),
     )
-    .map_err(|err| py_runtime_error(format!("Failed to initialize file watcher: {}", err)))?;
+    .map_err(|err| py_runtime_error(format!("Failed to initialize dev reload watcher: {}", err)))?;
 
     let mut watched = 0usize;
     for path in watch_paths {
@@ -282,7 +293,7 @@ fn run_dev_reloader_inner(
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
-            stop_worker(&mut worker)?;
+            stop_worker(&mut worker, WORKER_STOP_TIMEOUT_SHUTDOWN)?;
             return Ok(0);
         }
 
@@ -301,18 +312,18 @@ fn run_dev_reloader_inner(
             }
         }
 
-        match recv_change(&rx, &filter, debounce, poll_interval) {
+        match recv_change(&rx, &filter, debounce, recv_timeout) {
             Ok(Some(changed_path)) => {
                 eprintln!("[django-bolt] 🔄 Reloading ({})", changed_path.display());
                 reload_count += 1;
-                stop_worker(&mut worker)?;
+                stop_worker(&mut worker, WORKER_STOP_TIMEOUT_RELOAD)?;
                 worker = Some(spawn_worker(&command, reload_count)?);
                 worker_exited = false;
             }
             Ok(None) => {}
             Err(err) => {
                 if shutdown.load(Ordering::SeqCst) {
-                    stop_worker(&mut worker)?;
+                    stop_worker(&mut worker, WORKER_STOP_TIMEOUT_SHUTDOWN)?;
                     return Ok(0);
                 }
 
@@ -398,5 +409,14 @@ mod tests {
             first_relevant_path(&event, &filter),
             Some(PathBuf::from("/tmp/project/main.py"))
         );
+    }
+
+    #[test]
+    fn ignores_non_python_and_non_html_files() {
+        let filter = ReloadFilter::new(vec![], vec![]);
+        assert!(filter.is_relevant(&PathBuf::from("/tmp/project/main.py")));
+        assert!(filter.is_relevant(&PathBuf::from("/tmp/project/templates/index.html")));
+        assert!(!filter.is_relevant(&PathBuf::from("/tmp/project/runtime.log")));
+        assert!(!filter.is_relevant(&PathBuf::from("/tmp/project/static/app.css")));
     }
 }

@@ -15,6 +15,8 @@ from pathlib import Path
 from django.apps import apps
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.template.autoreload import get_template_directories
+from django.utils.autoreload import iter_all_python_module_files
 
 from django_bolt import _core
 from django_bolt.api import BoltAPI, _validate_asgi_mount_conflicts, serve_with_lifespan
@@ -34,18 +36,25 @@ except ImportError:
 
 _ENV_DEV_WORKER = "DJANGO_BOLT_DEV_WORKER"
 _ENV_DEV_RELOAD_COUNT = "DJANGO_BOLT_DEV_RELOAD_COUNT"
-DEV_RELOAD_DEBOUNCE_MS = 125
+DEV_RELOAD_DEBOUNCE_MS = 50
 
 DEV_RELOAD_IGNORE_DIRS = (
     ".git",
     ".hg",
     ".svn",
+    ".idea",
+    ".tox",
     ".venv",
+    ".vscode",
+    ".nox",
+    ".cache",
     "venv",
     "__pycache__",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    "build",
+    "dist",
     "node_modules",
     "target",
 )
@@ -133,40 +142,97 @@ def _venv_prefix_paths() -> set[Path]:
     return paths
 
 
-def _collect_dev_watch_paths() -> list[str]:
-    watch_paths: set[Path] = {Path.cwd().resolve()}
+def _collect_loaded_python_paths() -> set[Path]:
+    paths: set[Path] = set()
+    prefix_roots = _venv_prefix_paths()
 
-    base_dir = _coerce_path(getattr(settings, "BASE_DIR", None))
-    if base_dir is not None and base_dir.exists():
-        watch_paths.add(base_dir)
+    for module_path in iter_all_python_module_files():
+        path = _coerce_path(module_path)
+        if path is None or not path.exists():
+            continue
 
-    template_configs = getattr(settings, "TEMPLATES", [])
-    for config in template_configs:
-        for template_dir in config.get("DIRS", []):
-            path = _coerce_path(template_dir)
+        if any(_path_within(path, prefix_root) for prefix_root in prefix_roots):
+            continue
+
+        paths.add(path)
+
+    return paths
+
+
+def _module_spec_watch_paths(module_name: str) -> set[Path]:
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return set()
+
+    if spec is None:
+        return set()
+
+    watch_paths: set[Path] = set()
+
+    if spec.submodule_search_locations:
+        for search_location in spec.submodule_search_locations:
+            path = _coerce_path(search_location)
             if path is not None and path.exists():
                 watch_paths.add(path)
+        return watch_paths
 
-    static_dirs = getattr(settings, "STATICFILES_DIRS", [])
-    for static_dir in static_dirs:
-        if isinstance(static_dir, tuple):
-            static_dir = static_dir[1]
-        path = _coerce_path(static_dir)
-        if path is not None and path.exists():
-            watch_paths.add(path)
+    path = _coerce_path(spec.origin)
+    if path is not None and path.exists():
+        watch_paths.add(path)
 
-    prefix_roots = _venv_prefix_paths()
+    return watch_paths
+
+
+def _collect_autodiscovery_python_paths() -> set[Path]:
+    module_names: set[str] = set()
+
+    settings_module = getattr(settings, "SETTINGS_MODULE", None)
+    if settings_module:
+        module_names.add(settings_module)
+
+    root_urlconf = getattr(settings, "ROOT_URLCONF", None)
+    if root_urlconf:
+        module_names.add(root_urlconf)
+        module_names.update(_project_api_module_names(root_urlconf))
 
     if apps.ready:
         for app_config in apps.get_app_configs():
-            app_path = _coerce_path(app_config.path)
-            if app_path is None or not app_path.exists():
+            if app_config.name == "django_bolt":
                 continue
 
-            if any(_path_within(app_path, prefix_root) for prefix_root in prefix_roots):
-                continue
+            if hasattr(app_config, "bolt_api") and ":" in app_config.bolt_api:
+                module_names.add(app_config.bolt_api.split(":", 1)[0])
+            else:
+                module_names.add(f"{app_config.name}.api")
+                module_names.add(f"{app_config.name}.bolt_api")
 
-            watch_paths.add(app_path)
+    project_paths: set[Path] = set()
+    for module_name in module_names:
+        project_paths.update(_module_spec_watch_paths(module_name))
+
+    manage_py = Path.cwd().resolve() / "manage.py"
+    if manage_py.exists():
+        project_paths.add(manage_py)
+
+    return project_paths
+
+
+def _collect_dev_watch_paths() -> list[str]:
+    watch_paths: set[Path] = set(_collect_loaded_python_paths())
+    watch_paths.update(_collect_autodiscovery_python_paths())
+
+    for template_dir in get_template_directories():
+        path = _coerce_path(template_dir)
+        if path is not None and path.exists():
+            watch_paths.add(path)
+
+    if not watch_paths:
+        base_dir = _coerce_path(getattr(settings, "BASE_DIR", None))
+        if base_dir is not None and base_dir.exists():
+            watch_paths.add(base_dir)
+        else:
+            watch_paths.add(Path.cwd().resolve())
 
     return [str(path) for path in _collapse_watch_paths(watch_paths)]
 

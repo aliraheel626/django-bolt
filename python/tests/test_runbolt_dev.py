@@ -64,44 +64,47 @@ def test_collapse_watch_paths_deduplicates_nested_directories(tmp_path):
     assert collapsed == [root, sibling]
 
 
-def test_collect_dev_watch_paths_prefers_project_paths(settings, tmp_path, monkeypatch):
+def test_collect_dev_watch_paths_prefers_python_and_template_paths(settings, tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     templates_root = tmp_path / "templates"
     static_root = tmp_path / "static"
     external_app = tmp_path / "shared_app"
-    venv_root = tmp_path / "venv"
-    venv_app = venv_root / "lib" / "site-packages" / "third_party_app"
+    settings_module = project_root / "settings.py"
+    urls_module = project_root / "urls.py"
 
-    for path in (project_root, templates_root, static_root, external_app, venv_app):
+    for path in (project_root, templates_root, static_root, external_app):
         path.mkdir(parents=True, exist_ok=True)
 
+    settings_module.write_text("DEBUG = True\n")
+    urls_module.write_text("urlpatterns = []\n")
+
     monkeypatch.chdir(project_root)
-    monkeypatch.setattr(runbolt_module.sys, "prefix", str(venv_root))
-    monkeypatch.setattr(runbolt_module.sys, "base_prefix", str(venv_root))
-    monkeypatch.setattr(runbolt_module.sys, "exec_prefix", str(venv_root))
     monkeypatch.setattr(
         runbolt_module,
-        "apps",
-        SimpleNamespace(
-            ready=True,
-            get_app_configs=lambda: [
-                SimpleNamespace(path=str(external_app)),
-                SimpleNamespace(path=str(venv_app)),
-            ],
-        ),
+        "_collect_loaded_python_paths",
+        lambda: {settings_module, urls_module},
+    )
+    monkeypatch.setattr(
+        runbolt_module,
+        "_collect_autodiscovery_python_paths",
+        lambda: {external_app / "api.py"},
+    )
+    monkeypatch.setattr(
+        runbolt_module,
+        "get_template_directories",
+        lambda: {templates_root},
     )
 
     settings.BASE_DIR = project_root
-    settings.TEMPLATES = [{"DIRS": [templates_root]}]
-    settings.STATICFILES_DIRS = [static_root]
 
     watch_paths = set(runbolt_module._collect_dev_watch_paths())
 
-    assert str(project_root) in watch_paths
+    assert str(settings_module) in watch_paths
+    assert str(urls_module) in watch_paths
     assert str(templates_root) in watch_paths
-    assert str(static_root) in watch_paths
-    assert str(external_app) in watch_paths
-    assert str(venv_app) not in watch_paths
+    assert str(external_app / "api.py") in watch_paths
+    assert str(static_root) not in watch_paths
+    assert str(project_root) not in watch_paths
 
 
 def test_execute_from_command_line_dev_calls_reloader_with_debounce(monkeypatch):

@@ -254,6 +254,8 @@ python manage.py runbolt --processes 4 --workers 2
 python manage.py runbolt --host 127.0.0.1 --port 3000
 ```
 
+The dev reloader follows a Django-style source watch list: Python modules and HTML templates are reloaded automatically, while runtime files like logs, databases, and other generated artifacts do not trigger reloads.
+
 ## OpenAPI settings
 
 Configure via `OpenAPIConfig` in your api.py:

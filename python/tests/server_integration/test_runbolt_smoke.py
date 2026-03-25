@@ -66,3 +66,32 @@ def test_runbolt_dev_reloads_after_file_change(make_server_project):
         payload = server.wait_for_json("/version", lambda body: body["version"] == "v2", timeout=30)
 
     assert payload == {"version": "v2"}
+
+
+def test_runbolt_dev_ignores_non_python_and_non_html_changes(make_server_project):
+    project = make_server_project(
+        project_api_body="""
+        import os
+
+        @api.get("/reload-state")
+        async def reload_state():
+            return {
+                "pid": os.getpid(),
+                "reload_count": int(os.environ.get("DJANGO_BOLT_DEV_RELOAD_COUNT", "0")),
+            }
+        """,
+        extra_files={"testproj/runtime.log": "initial\n"},
+    )
+
+    with project.start(dev=True) as server:
+        initial = server.get("/reload-state").json()
+        assert initial["reload_count"] == 0
+
+        time.sleep(0.3)
+        project.write_file("testproj/runtime.log", "updated\n")
+        time.sleep(1.0)
+
+        after = server.get("/reload-state").json()
+
+    assert after["reload_count"] == initial["reload_count"]
+    assert after["pid"] == initial["pid"]
