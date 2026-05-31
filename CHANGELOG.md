@@ -6,21 +6,37 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Per-chunk streaming compression for SSE and async generators** - `StreamingResponse` and `EventSourceResponse` are now compressed on a per-chunk basis with a sync flush, so individual events still reach the client immediately. One encoder runs per connection so cross-chunk dictionary reuse still helps the ratio. Supports brotli, gzip, and zstd. Opt out per-route with `@no_compress` (same decorator as buffered).
-- **Unified `CompressionConfig` across buffered and streaming responses** - A single `CompressionConfig` now drives both the global buffered compression middleware and the streaming codec. Same `@no_compress` decorator opts a route out of both paths; same `Accept-Encoding` negotiation picks the encoding for both.
+- **Native media serving** - With `MEDIA_URL` + `MEDIA_ROOT` set, uploads are served from Rust: `GET`/`HEAD`, ETag/Last-Modified, conditional (`304`) and range requests.
+- **Native static serving** - `/static` now uses the same Rust handler (Python static route removed), resolving via `STATIC_ROOT`/`STATICFILES_DIRS`, with staticfiles finders as a `DEBUG`-only fallback.
+- **`BOLT_STATIC_MAX_AGE` / `BOLT_MEDIA_MAX_AGE`** - Emit `Cache-Control` on `2xx`: `public` for static, `private` for media. Validated into a pre-built header at startup.
+- **Optional CSP on file responses** - `SECURE_CSP`, if set, applies `Content-Security-Policy` to static and media responses (including errors).
+- **Union response types** - Handlers can declare union (`X | Y`) return types. (#228)
+- **Sequence form fields** - Repeated form keys bind to `list[T]` struct fields, with list emission handled Rust-side.
+- **Per-chunk streaming compression** - `StreamingResponse`/`EventSourceResponse` compress per chunk with a sync flush (events reach the client immediately); one encoder per connection preserves cross-chunk ratio. brotli/gzip/zstd; opt out with `@no_compress`.
+- **Unified `CompressionConfig`** - One config drives both buffered and streaming compression, sharing `@no_compress` and `Accept-Encoding` negotiation.
+
+### Security
+
+- **Script-bearing uploads force-downloaded** - Media with script-capable extensions (`.html`, `.svg`, `.js`, `.xml`, `.wasm`, …) is served as `application/octet-stream` + `Content-Disposition: attachment`. Inert types (images, PDF, CSS, JSON, text) still render inline. Media only — static keeps native content types.
+- **`X-Content-Type-Options: nosniff` on every file response**, including 404s.
+- **Traversal/dotfile/symlink protections** - `..` paths rejected with `400`; leading-dot components (`.env`, `.git/config`, …) return `404`; symlink targets must stay inside the root.
+- **No static/media route collisions** - Media misses no longer fall through to staticfiles finders, so `STATICFILES_DIRS` assets can't leak under `/media/`.
+- **Media config validated at startup** - `MEDIA_URL` must start with `/`; `MEDIA_ROOT` must be absolute.
 
 ### Changed
 
-- **Default `brotli_lgwin` lowered from 18 to 14** - The sliding-window log size now defaults to `14` (16 KiB window per active connection) instead of `18` (256 KiB). This is the dominant per-connection memory knob for streaming compression; the new default cuts memory per active SSE/WebSocket stream by ~16× at minimal cost to compression ratio for typical event payloads. Tune up for large repetitive bodies; tune down for high-fanout streams.
-- **Buffered Accept-Encoding negotiation aligned with RFC 7231 §5.3.4** - The buffered `select_encoding` now uses the same RFC-compliant parser as the streaming path. Q-values (`br;q=0`), the `*` wildcard (`*` accepts unmentioned codings; `*;q=0` rejects them), case-insensitive coding tokens, and explicit overrides of `*` are now honored on both paths. The prior substring-based matcher accepted `br;q=0` as brotli, ignored `*` entirely, and false-matched non-standard tokens like `x-gzip-old`.
+- **Unified static/media config** - Collapsed into one `ScopeConfig` tagged by a `ServeMode` enum (one `app_data` lookup per request). `HEAD` registered for both scopes, mirroring GET headers.
+- **`brotli_lgwin` default 18 → 14** - 16 KiB window (was 256 KiB) cuts per-stream memory ~16× at minimal ratio cost. Tune up for large repetitive bodies, down for high-fanout streams.
+- **Buffered Accept-Encoding negotiation now RFC 7231 §5.3.4-compliant** - Shares the streaming parser: honors q-values (`br;q=0`), the `*` wildcard, and case-insensitive tokens. The old substring matcher mis-handled all three.
 
 ### Fixed
 
-- **`BoltAPI(compression=False)` now actually disables buffered compression** - Previously, when compression was explicitly disabled, the buffered middleware still fell back to its hardcoded defaults (brotli with gzip fallback) and compressed responses anyway. The negotiator now correctly returns `identity` when no config is attached to the app state, matching the documented behavior. (`compression=None`, or omitting the kwarg, continues to apply the default `CompressionConfig()`.)
+- **`BoltAPI(compression=False)` now disables buffered compression** - Previously it still fell back to defaults and compressed anyway; the negotiator now returns `identity` when no config is attached. (`compression=None`/omitted still applies the default `CompressionConfig()`.)
 
 ### Documentation
 
-- **New dedicated `Compression` topic page** - Buffered and streaming compression are now documented together at `docs/src/topics/compression.md`, replacing the orphaned `streaming_compression.md` page. Covers `CompressionConfig`, negotiation, per-chunk flush mechanics, the `lgwin` per-connection memory table, level/ratio tradeoffs, and CRIME/BREACH guidance. The `middleware.md` Compression subsection shortened to a brief overview that links to the new page.
+- **New `media-files.md`** - Upload security model, `Cache-Control`, and production offloading (Nginx / object storage). `static-files.md` and settings reference updated for native serving and `BOLT_*_MAX_AGE`.
+- **New `compression.md`** - Buffered + streaming compression documented together (replaces `streaming_compression.md`): `CompressionConfig`, negotiation, per-chunk flush, `lgwin` memory table, level/ratio tradeoffs, CRIME/BREACH. `middleware.md` shortened to link here.
 
 ## [0.7.5]
 
