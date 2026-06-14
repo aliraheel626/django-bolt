@@ -37,7 +37,7 @@ def test_full_handshake_and_tool_call(make_server_project):
         assert session_id
         assert parse_rpc(init)["result"]["serverInfo"]["name"] == "itest-server"
 
-        notified = _post(server, "notifications/initialized", id=None, session_id=session_id)
+        notified = _post(server, "notifications/initialized", request_id=None, session_id=session_id)
         assert notified.status_code == 202
 
         listed = _post(server, "tools/list", session_id=session_id)

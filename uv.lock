@@ -165,6 +165,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bolt-mcp = [
+    { name = "bolt-mcp" },
+]
+mcp = [
+    { name = "bolt-mcp" },
+]
 nanodjango = [
     { name = "nanodjango" },
 ]
@@ -193,6 +199,8 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bolt-mcp", marker = "extra == 'bolt-mcp'", editable = "python/bolt-mcp" },
+    { name = "bolt-mcp", marker = "extra == 'mcp'", editable = "python/bolt-mcp" },
     { name = "click", specifier = ">=8.1" },
     { name = "django", specifier = ">=4.2" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -204,7 +212,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.5.0" },
     { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22.1" },
 ]
-provides-extras = ["yaml", "nanodjango"]
+provides-extras = ["yaml", "nanodjango", "mcp", "bolt-mcp"]
 
 [package.metadata.requires-dev]
 dev = [

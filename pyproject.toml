@@ -46,6 +46,11 @@ dependencies = [
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
 nanodjango = ["nanodjango>=0.16"]
+# MCP add-on: a separately-published, version-coupled package. `mcp` is the
+# canonical extra; `bolt-mcp` is an alias so `pip install django-bolt[bolt-mcp]`
+# also works. tool.uv.sources keeps local dev on the workspace copy.
+mcp = ["bolt-mcp>=0.1.0"]
+bolt-mcp = ["bolt-mcp>=0.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/FarhanAliRaza/django-bolt"
