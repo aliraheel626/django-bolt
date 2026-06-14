@@ -6,9 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Optional `bolt-mcp` add-on (MCP over Streamable HTTP)** - New pure-Python `bolt-mcp` package and an `api.mount_mcp()` entrypoint serve a Model Context Protocol server at a route, reusing Django-Bolt's Rust-side auth and per-tool guards. Supports OAuth 2.1 — including a built-in Authorization Server (RFC 9728/8414 discovery, RFC 7591 dynamic client registration, Authorization Code + PKCE, RFC 7009 revocation) so OAuth-native clients (Claude.ai, ChatGPT, Claude Code) link once and refresh silently — plus an explicit tool allowlist. Stays an optional dependency via lazy import and ships its own tag-driven release flow (`just release-mcp`).
 - **URL reversing for Bolt routes** - Include `django_bolt.urls` in your `ROOT_URLCONF` (`path("", include("django_bolt.urls"))`) and Django's `reverse()`, `reverse_lazy()`, and the `{% url %}` template tag resolve Bolt route names. Entries are reverse-only — Bolt still serves the paths in Rust and the registered views never run; path converters, `args`/`kwargs`, `query`, and `fragment` come from Django's own resolver.
 - **`name=` on every route decorator** - `@api.get/post/put/patch/delete/head/options`, `@api.websocket`, `@api.view`, `@api.viewset`, and `@action` accept an explicit reverse name. Unnamed routes derive a name verbatim from the Python identifier (function name, or class name for class-based views); viewsets name each route `{base}-{action}` (e.g. `user-list`, `user-partial_update`).
 - **Opt-in reverse namespaces** - `BoltAPI(namespace="...")` mirrors Django's `app_name`; namespaced routes reverse as `namespace:name` and resolve only under that namespace.
+
+### Security
+
+- **Supply-chain hardening for CI** - All third-party GitHub Actions and pre-commit hooks are SHA-pinned (with version comments), closing the tag-mutation hole; Renovate keeps the digests updated. A new `prek` lint workflow (ruff + trailing-whitespace/end-of-file hooks) runs on every PR. (#238)
+
+### Fixed
+
+- **OpenAPI component schemas carry struct title and description** - `_struct_to_schema` now populates `title` from a `msgspec.Struct`'s `__name__` and `description` from the struct's own docstring, matching `msgspec.json.schema_components`. Downstream codegen (e.g. `openapi-typescript`) renders the description as JSDoc on generated types. The docstring is read from `struct_type.__dict__` directly so an undocumented struct doesn't inherit `msgspec.Struct`'s base-class docstring. (#224)
 
 ### Documentation
 
