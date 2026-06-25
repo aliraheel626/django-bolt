@@ -232,6 +232,27 @@ class SchemaGenerator:
             )
         )
 
+    @staticmethod
+    def _apply_json_schema_extra(schema: Schema, extra: dict[str, Any]) -> Schema:
+        """Merge a msgspec ``extra_json_schema`` mapping onto a Schema in place.
+
+        ``msgspec.inspect`` collects the *informational* JSON-schema fields of a
+        ``Meta(...)`` annotation — ``title``/``description``/``examples`` plus any
+        explicit ``extra_json_schema`` — into this dict, keyed by their
+        JSON-schema names (the numeric/string *constraints* live on the wrapped
+        ``*Type`` instead). Map each key onto the matching Schema dataclass
+        attribute, translating camelCase JSON keys (e.g. ``maxLength``) to the
+        snake_case field name via the alias map. Keys with no corresponding
+        Schema field (e.g. arbitrary ``x-`` extensions) are skipped — the spec
+        dataclass cannot represent them. Returns the same Schema for chaining.
+        """
+        alias_map = Schema.field_aliases()  # {json_alias: field_name}
+        for key, value in extra.items():
+            attr = alias_map.get(key, key)
+            if hasattr(schema, attr):
+                setattr(schema, attr, value)
+        return schema
+
     def _msgspec_field_schema(
         self, field: Any, *, register_component: bool = False
     ) -> tuple[str, Schema | Reference, bool]:
@@ -1010,6 +1031,28 @@ class SchemaGenerator:
 
         # Handle msgspec type info objects (IntType, StrType, BoolType, etc.)
         type_name = type(type_annotation).__name__
+
+        # msgspec.inspect wraps an ``Annotated[T, Meta(...)]`` whose Meta carries
+        # informational fields (title/description/examples or an explicit
+        # extra_json_schema) in a ``Metadata`` node: ``.type`` is the underlying
+        # ``*Type`` (StrType/IntType/…) carrying the constraints, and
+        # ``.extra_json_schema`` holds the informational fields. A Meta with
+        # *only* constraints stays a bare ``*Type`` (handled below), but every
+        # documented custom type — Email, PositiveInt, HttpsURL, … i.e. all of
+        # ``serializers.types`` — gets this wrapper. Without unwrapping it here,
+        # those fields fall through every branch to the generic ``object``
+        # fallback and codegen tools (typescript-fetch, openapi-typescript)
+        # emit ``object`` instead of string/integer. (#235)
+        if type_name == "Metadata":
+            base = self._type_to_schema(type_annotation.type, register_component=register_component)
+            extra = getattr(type_annotation, "extra_json_schema", None)
+            # Constraints already live on ``base`` (from the wrapped *Type); only
+            # the docs need merging, and only onto an inline Schema — a $ref to a
+            # component (Struct) carries its own description and can't take siblings.
+            if extra and isinstance(base, Schema):
+                self._apply_json_schema_extra(base, extra)
+            return base
+
         if hasattr(type_annotation, "__class__") and type_name.endswith("Type"):
             # Numeric types with constraint support (ge/gt/le/lt/multiple_of)
             if type_name == "IntType":
@@ -1085,8 +1128,18 @@ class SchemaGenerator:
                     item_schema = self._type_to_schema(item_type, register_component=register_component)
                     return Schema(type="array", items=item_schema)
                 return Schema(type="array", items=Schema(type="object"))
-            # For dict types from msgspec
+            # For dict types from msgspec — recurse into the *value* type so
+            # dict[str, V] emits additionalProperties: <schema for V>, mirroring
+            # the ListType branch above and matching msgspec.json.schema. JSON
+            # object keys are always strings, so only V is described. An untyped
+            # value (bare dict / dict[str, Any], which msgspec models as AnyType)
+            # has nothing to describe — keep additionalProperties: true rather
+            # than regressing to {"type": "object"}.
             if type_name == "DictType":
+                value_type = getattr(type_annotation, "value_type", None)
+                if value_type is not None and type(value_type).__name__ != "AnyType":
+                    value_schema = self._type_to_schema(value_type, register_component=register_component)
+                    return Schema(type="object", additional_properties=value_schema)
                 return Schema(type="object", additional_properties=True)
             # For enum types from msgspec (EnumType for plain enums,
             # CustomType for Django TextChoices/IntegerChoices which use
@@ -1109,6 +1162,19 @@ class SchemaGenerator:
         args = get_args(type_annotation)
 
         if origin is Annotated:
+            # A documented custom type (e.g. ``Email = Annotated[str, Meta(...)]``)
+            # used directly as a response model — bare (``-> Email``) or nested
+            # (``-> list[Email]``) — reaches here as a raw typing.Annotated still
+            # carrying its msgspec Meta. Normalize it through msgspec.inspect so it
+            # renders identically to the same type used as a Struct field (the
+            # Metadata branch above then applies constraints + docs). Param markers
+            # like Query()/Header() are not msgspec.Meta, so ``Annotated[T, Query()]``
+            # still falls through to the plain unwrap below. (#235)
+            if any(isinstance(m, msgspec.Meta) for m in args[1:]):
+                return self._type_to_schema(
+                    msgspec.inspect.type_info(type_annotation),
+                    register_component=register_component,
+                )
             # Unwrap Annotated[T, ...]
             type_annotation = args[0]
             origin = get_origin(type_annotation)
@@ -1158,8 +1224,17 @@ class SchemaGenerator:
             item_schema = self._type_to_schema(item_type, register_component=register_component)
             return Schema(type="array", items=item_schema)
 
-        # Handle dict
+        # Handle dict — recurse into the value type V of dict[K, V] so the
+        # schema carries additionalProperties: <schema for V>, mirroring the
+        # list branch above and matching msgspec.json.schema. Keys are JSON
+        # strings, so only V is described. Bare dict[K] without a value type or
+        # dict[str, Any] has nothing to describe — keep additionalProperties:
+        # true rather than regressing untyped dicts to {"type": "object"}.
         if origin is dict:
+            value_type = args[1] if len(args) == 2 else None
+            if value_type is not None and value_type is not Any:
+                value_schema = self._type_to_schema(value_type, register_component=register_component)
+                return Schema(type="object", additional_properties=value_schema)
             return Schema(type="object", additional_properties=True)
 
         # Bare typing.Literal annotations don't come through
