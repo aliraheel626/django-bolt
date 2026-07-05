@@ -170,6 +170,7 @@ fn parse_cors_config_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<CorsConfig>
                 "PATCH".to_string(),
                 "DELETE".to_string(),
                 "OPTIONS".to_string(),
+                "QUERY".to_string(),
             ]
         });
 
@@ -617,7 +618,8 @@ pub fn test_request(
             let mut req = test::TestRequest::with_uri(&uri);
 
             // Set method
-            req = match method.to_uppercase().as_str() {
+            let method_upper = method.to_uppercase();
+            req = match method_upper.as_str() {
                 "GET" => req.method(actix_web::http::Method::GET),
                 "POST" => req.method(actix_web::http::Method::POST),
                 "PUT" => req.method(actix_web::http::Method::PUT),
@@ -625,7 +627,18 @@ pub fn test_request(
                 "DELETE" => req.method(actix_web::http::Method::DELETE),
                 "OPTIONS" => req.method(actix_web::http::Method::OPTIONS),
                 "HEAD" => req.method(actix_web::http::Method::HEAD),
-                _ => req.method(actix_web::http::Method::GET),
+                // QUERY is a supported method but has no actix constant.
+                "QUERY" => req.method(
+                    actix_web::http::Method::from_bytes(b"QUERY")
+                        .expect("QUERY is a valid HTTP method token"),
+                ),
+                // Reject anything that isn't a supported method instead of
+                // silently defaulting to GET, which would hide typos in tests.
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Unsupported HTTP method {other:?}"
+                    )));
+                }
             };
 
             // Set headers

@@ -317,7 +317,7 @@ def infer_param_source(name: str, annotation: Any, path_params: set[str], http_m
     1. If name matches path parameter -> "path"
     2. If special name (request, req) -> "request"
     3. If simple type (str, int, float, bool) -> "query"
-    4. If msgspec.Struct or dataclass -> "body" (if method allows body)
+    4. If msgspec.Struct or dataclass -> "body" (method validation happens later)
     5. Default -> "query"
 
     Args:
@@ -350,11 +350,10 @@ def infer_param_source(name: str, annotation: Any, path_params: set[str], http_m
         if args and is_simple_type(args[0]):
             return "query"
 
-    # 5. Complex types (msgspec.Struct, dataclass) -> body (if allowed)
+    # 5. Complex types (msgspec.Struct, dataclass) -> body
+    # Method-appropriateness (rejecting bodies on GET/DELETE/HEAD) is enforced
+    # later in the validation path, not here.
     if is_msgspec_struct(unwrapped) or is_dataclass_type(unwrapped):
-        if http_method in {"POST", "PUT", "PATCH"}:
-            return "body"
-        # For GET/DELETE/HEAD, this will trigger validation error later
         return "body"
 
     # 6. Default to query
