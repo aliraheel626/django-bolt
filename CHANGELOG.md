@@ -2,14 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.0]
+
+### Added
+
+- **HTTP `QUERY` method support** - The safe, body-bearing `QUERY` method — a `GET` that carries a request body, for search and filter endpoints that outgrow the query string — is wired through the whole stack: `@api.query` / `Router.query`, `APIView`, the `@action` decorator, the nanodjango plugin, and `TestClient.query`. Body structs are inferred as they are for `POST`/`PUT`/`PATCH`, `QUERY` joins the default CORS method list, and it coexists with `GET` on the same path. The OpenAPI generator emits it as a `query` operation, declaring OpenAPI `3.2.0` only when a `QUERY` route is present so every other schema stays `3.1.0` for maximum tooling compatibility. (#253)
+- **Worker recycling for long-running servers** - `runbolt` can now recycle workers on actual memory pressure rather than a request-count proxy. `--max-rss <MiB>` recycles a worker once its resident set crosses the threshold, `--workers-lifetime <s>` recycles on wall-clock age, and `--respawn-failed-workers` replaces crashed workers instead of letting the fleet silently shrink. Recycling is spawn-first — the replacement binds the port via `SO_REUSEPORT` before the old worker receives `SIGTERM`, so there is always an accepting process — and staggered to at most one worker per tick. On shutdown (recycling, `systemd stop`, or `kubectl delete pod`) the server closes every WebSocket with code `1012` (Service Restart) so clients reconnect to a healthy worker, refuses new upgrades with `503` while draining, then performs a graceful stop for in-flight HTTP; `--workers-kill-timeout <s>` bounds the grace window before `SIGKILL`. (#248)
+- **Configurable maximum parameter length** - `DJANGO_BOLT_MAX_PARAM_LENGTH` overrides the default request-parameter size limit. It is resolved once at startup (no per-request lock or env lookup) and applied uniformly across every parameter source: path, query, header, cookie, form, multipart, and WebSocket. (#240)
+
+### Changed
+
+- **Lower per-request memory footprint** - A pass of allocation reductions across the hot path. Request bodies are pre-allocated from `Content-Length`, collapsing the O(n²) reallocation traffic of repeated `extend_from_slice` into a single sized allocation (chunked/unknown-length bodies keep standard growth). Raw `ResponseWireV1` tuples bypass the `MiddlewareResponse` round-trip that previously allocated a wrapper and demoted integer meta tags to the slow path. The HTTP method is stored as a 1-byte enum instead of a heap-allocated `String`, and fast-path handlers (no middleware, signals, or Django middleware) skip the per-request connection-info string allocations they never read. The route metadata store moved from a sparse `Vec<Option<…>>` sized to the maximum route ID to a hash map sized to the actual route count, and common error responses — `400`/`413`/`500`, joining the existing `401`/`403`/`404` — now serve pre-computed static bodies with no per-response allocation. (#232)
+
+### Security
+
+- **Parameter-length limit is now enforced as a hard boundary** - Oversized values could previously slip past the limit on two paths: multipart text fields were fully buffered into memory before the check ran, and WebSocket query/path params fell back to passing the raw string through on any coercion error. Multipart fields are now checked incrementally while reading, and a length violation rejects the WebSocket upgrade with `400`. (#240)
+- **Bounded async logging queue** - The `QueueHandler` behind non-blocking log delivery was unbounded, so a burst of records — e.g. a client flooding `5xx` errors — could grow in memory until OOM. It is now capped at 10,000 records; when the queue is full, new records are dropped rather than accumulating without limit. (#232)
 
 ### Fixed
 
+- **Serializer response models render via `from_model()` + `dump()`** - Serializer (and `list[Serializer]`) responses were projected through `QuerySet.values()`, which drops computed fields, inherited fields, `write_only` exclusions, aliases, `source` mappings, and nested serializers. They now route through `from_model()` + `dump()` — including paginated list actions — with the faster `.values()` projection reserved for plain `msgspec.Struct` output. Unloaded Django relations detected mid-dump fall back to the async `afrom_model()` loader instead of failing. (#251)
+- **Admin session support is detected via middleware, not `INSTALLED_APPS`** - The admin auto-mount runs through Django's own ASGI application and therefore `settings.MIDDLEWARE`, so its real requirement is a `SessionMiddleware` in that chain (mirroring Django's own `admin.E410` system check), not `django.contrib.sessions` in `INSTALLED_APPS`. Matching against a `SessionMiddleware` subclass means alternative backends like `django-qsessions` — which replace the sessions app and subclass the middleware — are recognized instead of spuriously disabling the admin.
 - **OpenAPI: named enums now emit reusable components** - Enums (`enum.Enum`, msgspec `EnumType`, Django `TextChoices`/`IntegerChoices`) used in request/response bodies were inlined as `{"type": "string", "enum": [...]}` at every use site, so codegen tools (`openapi-typescript`, `typescript-fetch`) couldn't emit a shared named type and the enum's docstring was lost. Named enum classes are now promoted to `#/components/schemas/<Name>` components + `$ref` — parallel to how Structs are registered — carrying their docstring as `description`, matching `msgspec.json.schema_components`. Anonymous `Literal[...]` unions and query-parameter enums stay inline (no name to register under / inline context). Component naming is two-pass: a type keeps its short `__name__` unless another *distinct* type shares it, in which case the colliding types expand to their `module.qualname` so same-named types from different apps coexist (also matching `msgspec.json.schema_components`); only types that are indistinguishable by module + qualname raise `ComponentNameCollisionError`. (#246)
 - **OpenAPI: struct field `default_factory` values are no longer dropped** - Fields whose default came from one of the builtin mutable factories (`list`/`dict`/`set`/`bytearray`, e.g. `tags: list[str] = msgspec.field(default_factory=list)`) lost their `default` in the generated schema because the generator read only `field.default`, never `field.default_factory`. It now materializes those four factories so the schema carries `default: []`/`default: {}`, matching `msgspec.json.schema` exactly — other factories (e.g. `datetime.now`) deliberately get no `default`, as msgspec does, which also avoids embedding a non-JSON-encodable value that would break spec serialization. (#245)
+
+### Documentation
+
+- **Testing guide rewritten** - The testing guide is now anchored by an executable, end-to-end proof rather than standalone snippets, so the documented `TestClient` workflow is verified against the real stack. (#252)
+
+## [0.8.4]
+
+### Fixed
+
 - **OpenAPI: typed dict values now render their value type** - `dict[K, V]` was emitted as `{"type": "object", "additionalProperties": true}` regardless of `V`, so codegen tools (`openapi-typescript`, `typescript-fetch`) generated `Record<string, unknown>` for every typed map (`dict[str, int]`, `dict[str, SomeStruct]`, str→str maps, …). Both dict paths in the schema generator now recurse into `V` — exactly as the adjacent list handlers recurse into the item type — emitting `additionalProperties: {"type": "integer"}`, `additionalProperties: {"$ref": …}` (nested Structs are registered as components), or `additionalProperties: {"anyOf": [...]}` for `dict[str, T | None]`, matching `msgspec.json.schema`. Untyped dicts (`dict`, `dict[str, Any]`) keep `additionalProperties: true`.
 - **OpenAPI: documented constrained types now render as their base type** - Custom types built with `Annotated[T, msgspec.Meta(...)]` that also carry a `description`/`examples`/`title` — every type in `django_bolt.serializers.types` (`Email`, `PositiveInt`, `HttpsURL`, …) — were emitted as an empty `{"type": "object"}` schema, so codegen tools (`openapi-typescript`, `typescript-fetch`) generated `object` instead of `string`/`integer`. `msgspec.inspect` wraps such fields in a `Metadata` node that the generator didn't recognise; it now unwraps that node to the underlying type, carrying constraints (`maxLength`, `pattern`, `exclusiveMinimum`, …) and docs through, matching `msgspec.json.schema`. Custom types used directly as response models (`-> Email`, `-> list[Email]`) are normalised the same way. (#235)
+
+## [0.8.3]
+
+### Added
+
+- **Optional `mcp` / `bolt-mcp` install extras** - The MCP add-on introduced in 0.8.2 is now installable through package extras, so `mount_mcp()` users pull the dependency explicitly while it stays out of the base install.
 
 ## [0.8.2]
 
